@@ -1,0 +1,36 @@
+---
+# Wait for the following vars:
+#  - cops_provision_push_code_path: destination path
+#  - cops_provision_push_code_origin_path: origin path
+#  - cops_provision_push_code_origin: origin inventory name (default localhost)
+#  - cops_provision_push_code_opts: rsync knobs
+- hosts: all
+  tasks:
+  - include_role: {name: corpusops.roles/vars_registry}
+    vars:
+      cops_vars_registry_target: cops_provision_push_code
+  - name: deploy code container inside the target environment
+    file:
+      state: directory
+      dest: "{{cops_provision_push_code_vars.path}}"
+  - name: synchronise files inside the environment
+    delegate_to: "{{cops_provision_push_code_vars.origin|default('localhost')}}"
+    synchronize:
+      compress: false
+      ssh_args: >-
+          {% if (
+              hostvars[inventory_hostname].ansible_connection|default('ssh')
+             ) not in [ 'smart', 'local'] %}
+          {{ hostvars[inventory_hostname].ansible_ssh_common_args | default('') }}
+          {{ hostvars[inventory_hostname].ansible_ssh_extra_ars | default('') }}
+          {% endif %}
+      src: "{{cops_provision_push_code_vars.origin_path}}"
+      dest: "{{cops_provision_push_code_vars.path}}"
+      rsync_opts: |-
+        {{cops_provision_push_code_rsync_opts|default([
+                          '-a',
+                          '-z',
+                          '-v',
+                          '--exclude="./local"',
+                          '--exclude=\'*.retry\''])}}
+
