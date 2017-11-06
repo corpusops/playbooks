@@ -1,36 +1,83 @@
 ---
 # Wait for the following vars:
 #  - cops_provision_push_code_path: destination path
+#  - cops_provision_push_code_owner: default: root
+#  - cops_provision_push_code_group: default: root
 #  - cops_provision_push_code_origin_path: origin path
 #  - cops_provision_push_code_origin: origin inventory name (default localhost)
-#  - cops_provision_push_code_opts: rsync knobs
-- hosts: all
-  tasks:
-  - include_role: {name: corpusops.roles/vars_registry}
-    vars:
-      cops_vars_registry_target: cops_provision_push_code
-  - name: deploy code container inside the target environment
-    file:
-      state: directory
-      dest: "{{cops_provision_push_code_vars.path}}"
-  - name: synchronise files inside the environment
-    delegate_to: "{{cops_provision_push_code_vars.origin|default('localhost')}}"
-    synchronize:
-      compress: false
-      ssh_args: >-
-          {% if (
-              hostvars[inventory_hostname].ansible_connection|default('ssh')
-             ) not in [ 'smart', 'local'] %}
-          {{ hostvars[inventory_hostname].ansible_ssh_common_args | default('') }}
-          {{ hostvars[inventory_hostname].ansible_ssh_extra_ars | default('') }}
-          {% endif %}
-      src: "{{cops_provision_push_code_vars.origin_path}}"
-      dest: "{{cops_provision_push_code_vars.path}}"
-      rsync_opts: |-
-        {{cops_provision_push_code_rsync_opts|default([
-                          '-a',
-                          '-z',
-                          '-v',
-                          '--exclude="./local"',
-                          '--exclude=\'*.retry\''])}}
-
+#  - cops_provision_push_code_rsync_opts: rsync knobs
+#  - cops_provision_push_code_file_tests: skip if files are thre
+- include_role: {name: corpusops.roles/vars_registry}
+  vars:
+    cops_vars_registry_target: cops_provision_push_code
+- stat:
+    path: "{{cops_provision_push_code_vars.path}}/{{d}}"
+  loop_control: {loop_var: d}
+  with_items: "{{cops_provision_push_code_vars.file_tests | default([])}}"
+  register: cops_drupal_push_already_done_
+- set_fact:
+    cops_provision_push_code_ad: |-
+      {% set ret = {'r': True} %}
+      {% if ((not cops_provision_push_code_vars.file_tests | default([])) or
+             (not cops_drupal_push_already_done_.results)) %}
+      {% set _ = ret.update({'r': False}) %}
+      {% else %}
+      {% for i in cops_drupal_push_already_done_.results %}
+      {% if not i.stat.exists %}
+      {% set _ = ret.update({'r': False}) %}
+      {% endif %}
+      {% endfor %}
+      {% endif %}
+      {{ret.r|to_json}}
+- set_fact:
+    cops_push_owner: "{{cops_provision_push_code_vars.owner|default('root')}}"
+    cops_push_group: "{{cops_provision_push_code_vars.group|default('root')}}"
+    cops_push_code_origin: "{{cops_provision_push_code_vars.get('origin', '') or 'localhost'}}"
+  when: not cops_provision_push_code_ad
+- set_fact:
+    cops_push_code_origin_con_: |-
+      {% if cops_push_code_origin in ['127.0.0.1', 'localhost'] %}local
+      {% else %}{{hostvars.get(cops_push_code_origin,
+                               {}).get('ansible_connection', 'local')}}
+      {% endif %}
+  when: not cops_provision_push_code_ad
+- name: deploy code container inside the target environment
+  file:
+    state: directory
+    path: "{{d}}"
+    owner: "{{cops_push_owner}}"
+    group: "{{cops_push_group}}"
+  loop_control: {loop_var: d}
+  with_items:
+    - "{{cops_provision_push_code_vars.path}}"
+  when: not cops_provision_push_code_ad
+- set_fact:
+    cops_push_code_origin_con: "{{cops_push_code_origin_con_.strip()}}"
+  when: not cops_provision_push_code_ad
+- name: synchronise files inside the environment
+  delegate_to: "{{cops_provision_push_code_origin}}"
+  synchronize:
+    compress: false
+    ssh_args: >-
+        {% set k = hostvars[inventory_hostname].get(
+                      'ansible_ssh_private_key_file', '') %}
+        {% if k%}-o IdentityFile={{k}}{%endif%}
+        {% if (
+            hostvars[inventory_hostname].ansible_connection|default('ssh')
+           ) not in [ 'smart', 'local'] %}
+        {{ hostvars[inventory_hostname].ansible_ssh_args | default('') }}
+        {{ hostvars[inventory_hostname].ansible_ssh_common_args | default('') }}
+        {{ hostvars[inventory_hostname].ansible_ssh_extra_args | default('') }}
+        {% endif %}
+    src: "{{cops_provision_push_code_vars.origin_path|default(''|copsf_cwd)}}"
+    dest: "{{cops_provision_push_code_vars.path}}"
+    rsync_opts: |-
+      {{(cops_provision_push_code_vars.get('rsync_opts', []) or [
+                        '-a',
+                        '-z',
+                        '-v',
+                        "--exclude='./local'",
+                        "--exclude='*.retry'"])}}
+  vars:
+    ansible_connection: "{{cops_push_code_origin_con}}"
+  when: not cops_provision_push_code_ad
