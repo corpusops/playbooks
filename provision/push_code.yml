@@ -15,69 +15,74 @@
   loop_control: {loop_var: d}
   with_items: "{{cops_provision_push_code_vars.file_tests | default([])}}"
   register: cops_drupal_push_already_done_
-- set_fact:
-    cops_provision_push_code_ad: |-
-      {% set ret = {'r': True} %}
-      {% if ((not cops_provision_push_code_vars.file_tests | default([])) or
-             (not cops_drupal_push_already_done_.results)) %}
-      {% set _ = ret.update({'r': False}) %}
-      {% else %}
-      {% for i in cops_drupal_push_already_done_.results %}
-      {% if not i.stat.exists %}
-      {% set _ = ret.update({'r': False}) %}
-      {% endif %}
-      {% endfor %}
-      {% endif %}
-      {{ret.r|to_json}}
-- set_fact:
-    cops_push_owner: "{{cops_provision_push_code_vars.owner|default('root')}}"
-    cops_push_group: "{{cops_provision_push_code_vars.group|default('root')}}"
-    cops_push_code_origin: "{{cops_provision_push_code_vars.get('origin', '') or 'localhost'}}"
-  when: not cops_provision_push_code_ad
-- set_fact:
-    cops_push_code_origin_con_: |-
-      {% if cops_push_code_origin in ['127.0.0.1', 'localhost'] %}local
-      {% else %}{{hostvars.get(cops_push_code_origin,
-                               {}).get('ansible_connection', 'local')}}
-      {% endif %}
-  when: not cops_provision_push_code_ad
-- name: deploy code container inside the target environment
-  file:
-    state: directory
-    path: "{{d}}"
-    owner: "{{cops_push_owner}}"
-    group: "{{cops_push_group}}"
-  loop_control: {loop_var: d}
-  with_items:
-    - "{{cops_provision_push_code_vars.path}}"
-  when: not cops_provision_push_code_ad
-- set_fact:
-    cops_push_code_origin_con: "{{cops_push_code_origin_con_.strip()}}"
-  when: not cops_provision_push_code_ad
-- name: synchronise files inside the environment
-  delegate_to: "{{cops_provision_push_code_origin}}"
-  synchronize:
-    compress: false
-    ssh_args: >-
+- debug:
+    msg:
+      already_done: |-
+        {% set ret = {'r': True} %}
+        {% if ((not cops_provision_push_code_vars.file_tests | default([])) or
+               (not cops_drupal_push_already_done_.results)) %}
+        {% set _ = ret.update({'r': False}) %}
+        {% else %}
+        {% for i in cops_drupal_push_already_done_.results %}
+        {% if not i.stat.exists %}
+        {% set _ = ret.update({'r': False}) %}
+        {% endif %}
+        {% endfor %}
+        {% endif %}
+        {{'{0}'.format(ret.r)}}
+      owner: "{{cops_provision_push_code_vars.owner|default('root')}}"
+      group: "{{cops_provision_push_code_vars.group|default('root')}}"
+      # uniformize localhost origin to localhost
+      origin: "{% set o = cops_provision_push_code_vars.get(
+                  'origin', '') %}{{(
+                    ((not o) or o in ['localhost', 'local', '127.0.0.1'])
+                    and 'localhost' or o)}}"
+      ssh_args: >-
         {% set k = hostvars[inventory_hostname].get(
                       'ansible_ssh_private_key_file', '') %}
         {% if k%}-o IdentityFile={{k}} -o IdentitiesOnly=yes{%endif%}
         {% if (
             hostvars[inventory_hostname].ansible_connection|default('ssh')
            ) not in [ 'smart', 'local'] %}
+        {{ hostvars[inventory_hostname].ssh_args | default('') }}
         {{ hostvars[inventory_hostname].ansible_ssh_args | default('') }}
         {{ hostvars[inventory_hostname].ansible_ssh_common_args | default('') }}
         {{ hostvars[inventory_hostname].ansible_ssh_extra_args | default('') }}
         {% endif %}
+      rsync_opts: |-
+        {{(cops_provision_push_code_vars.get('rsync_opts', []) or [
+                          '-a',
+                          '-z',
+                          '-v',
+                          "--include", "local/setups.*",
+                          "--exclude", "local/*",
+                          "--exclude", ".vagrant",
+                          "--exclude", "*.retry"])}}
+  register: cops_push_code_ssh_vars
+- name: deploy code container inside the target environment
+  file:
+    state: directory
+    path: "{{d}}"
+    owner: "{{cops_push_code_ssh_vars.msg.owner}}"
+    group: "{{cops_push_code_ssh_vars.msg.group}}"
+  loop_control: {loop_var: d}
+  with_items:
+    - "{{cops_provision_push_code_vars.path}}"
+  when: not cops_push_code_ssh_vars.msg.already_done
+- name: synchronise files inside the environment (deleguation)
+  delegate_to: "{{cops_push_code_ssh_vars.msg.origin}}"
+  synchronize:
+    compress: false
+    ssh_args: "{{cops_push_code_ssh_vars.msg.ssh_args}}"
     src: "{{cops_provision_push_code_vars.origin_path|default(''|copsf_cwd)}}"
     dest: "{{cops_provision_push_code_vars.path}}"
-    rsync_opts: |-
-      {{(cops_provision_push_code_vars.get('rsync_opts', []) or [
-                        '-a',
-                        '-z',
-                        '-v',
-                        "--exclude='./local'",
-                        "--exclude='*.retry'"])}}
-  vars:
-    ansible_connection: "{{cops_push_code_origin_con}}"
-  when: not cops_provision_push_code_ad
+    rsync_opts: "{{cops_push_code_ssh_vars.msg.rsync_opts}}"
+  when: not cops_push_code_ssh_vars.msg.already_done and not cops_push_code_ssh_vars.msg.origin in ['localhost']
+- name: synchronise files inside the environment
+  synchronize:
+    compress: false
+    ssh_args: "{{cops_push_code_ssh_vars.msg.ssh_args}}"
+    src: "{{cops_provision_push_code_vars.origin_path|default(''|copsf_cwd)}}"
+    dest: "{{cops_provision_push_code_vars.path}}"
+    rsync_opts: "{{cops_push_code_ssh_vars.msg.rsync_opts}}"
+  when: not cops_push_code_ssh_vars.msg.already_done and cops_push_code_ssh_vars.msg.origin in ['localhost']
